@@ -9,6 +9,17 @@ import {
 } from './db.js';
 import { askLLM } from './llm.js';
 
+import http from 'http';
+
+// Servidor HTTP ligero para que Render lo ejecute en el plan 100% GRATUITO (Web Service)
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('🤖 Bot del Semillero Agil Project activo 24/7!');
+}).listen(PORT, () => {
+  console.log(`🌐 Servidor de salud iniciado en puerto ${PORT}`);
+});
+
 if (!process.env.TELEGRAM_BOT_TOKEN) {
   console.error('❌ TELEGRAM_BOT_TOKEN no está definido en el archivo .env');
   process.exit(1);
