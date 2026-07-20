@@ -8,6 +8,7 @@ import {
   deleteKnowledge,
 } from './db.js';
 import { askLLM } from './llm.js';
+import { createClient } from '@supabase/supabase-js';
 
 import http from 'http';
 
@@ -24,6 +25,12 @@ if (!process.env.TELEGRAM_BOT_TOKEN) {
   console.error('❌ TELEGRAM_BOT_TOKEN no está definido en el archivo .env');
   process.exit(1);
 }
+
+// Cliente Supabase para operar sobre la tabla proposals (moderación)
+const supabase =
+  process.env.SUPABASE_URL && process.env.SUPABASE_KEY
+    ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY)
+    : null;
 
 const bot = new Telegraf(process.env.TELEGRAM_BOT_TOKEN);
 const ADMIN_IDS = (process.env.ADMIN_IDS || '')
@@ -52,7 +59,10 @@ bot.start((ctx) => {
     ? '\n\n⭐ *Modo Administrador Activo*\n' +
       '• `/addinfo [#tag] <texto>` — Agregar información\n' +
       '• `/listinfo` — Ver últimas entradas\n' +
-      '• `/delinfo <id>` — Borrar una entrada por ID'
+      '• `/delinfo <id>` — Borrar una entrada por ID\n' +
+      '• `/propuestas` — Ver propuestas pendientes de la web\n' +
+      '• `/aprobar <id>` — Aprobar una propuesta y publicarla\n' +
+      '• `/rechazar <id>` — Rechazar una propuesta'
     : '';
 
   const msg =
@@ -75,7 +85,10 @@ bot.command(['help', 'ayuda'], (ctx) => {
     ? '\n\n🛠️ *Comandos de Administrador:*\n' +
       '• `/addinfo #parcial El examen es el 25 de julio` (Puedes usar etiquetas `#tag`)\n' +
       '• `/listinfo` — Lista los últimos 10 elementos registrados con su ID\n' +
-      '• `/delinfo 5` — Elimina la entrada con ID 5'
+      '• `/delinfo 5` — Elimina la entrada con ID 5\n' +
+      '• `/propuestas` — Muestra las propuestas pendientes enviadas desde la web\n' +
+      '• `/aprobar 3` — Aprueba la propuesta #3 y la publica automáticamente\n' +
+      '• `/rechazar 3` — Rechaza la propuesta #3'
     : '';
 
   const msg =
@@ -239,6 +252,150 @@ bot.command('delinfo', async (ctx) => {
   } catch (err) {
     console.error('Error en /delinfo:', err);
     ctx.reply(`No se pudo eliminar la entrada #${id}. Verifica que el ID exista.`);
+  }
+});
+
+// =====================================================================
+// COMANDOS DE MODERACIÓN: propuestas enviadas desde la web (Proponer.jsx)
+// =====================================================================
+
+// /propuestas — Lista las propuestas pendientes desde la web
+bot.command('propuestas', async (ctx) => {
+  if (!isAdmin(ctx)) {
+    return replySafe(ctx, '⛔ Este comando está reservado para los administradores del semillero.');
+  }
+
+  if (!supabase) {
+    return replySafe(ctx, '⚠️ Supabase no está configurado en este entorno.');
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from('proposals')
+      .select('id, nombre, tipo, modulo, contenido, estado, created_at')
+      .eq('estado', 'pendiente')
+      .order('created_at', { ascending: true })
+      .limit(10);
+
+    if (error) throw error;
+
+    if (!data || data.length === 0) {
+      return replySafe(ctx, '✅ No hay propuestas pendientes de revisión en este momento.');
+    }
+
+    const msg =
+      `📥 *Propuestas pendientes de revisión (${data.length}):*\n\n` +
+      data
+        .map((p) => {
+          const preview = p.contenido.length > 80 ? `${p.contenido.slice(0, 80)}…` : p.contenido;
+          return (
+            `*#${p.id}* — [${p.tipo}] \`${p.modulo}\`\n` +
+            `👤 ${p.nombre}\n` +
+            `_${preview}_`
+          );
+        })
+        .join('\n\n') +
+      '\n\n✅ `/aprobar <id>` — ❌ `/rechazar <id>`';
+
+    replySafe(ctx, msg);
+  } catch (err) {
+    console.error('Error en /propuestas:', err);
+    ctx.reply('Error al obtener las propuestas.');
+  }
+});
+
+// /aprobar <id> — Aprueba la propuesta y la pasa al knowledge base compartido
+bot.command('aprobar', async (ctx) => {
+  if (!isAdmin(ctx)) {
+    return replySafe(ctx, '⛔ Este comando está reservado para los administradores del semillero.');
+  }
+
+  if (!supabase) {
+    return replySafe(ctx, '⚠️ Supabase no está configurado en este entorno.');
+  }
+
+  const id = ctx.message.text.replace(/^\/aprobar/, '').trim();
+  if (!id || isNaN(id)) {
+    return replySafe(ctx, '⚠️ *Uso:* `/aprobar <ID>`\n*Ejemplo:* `/aprobar 5`');
+  }
+
+  try {
+    // 1. Buscar la propuesta
+    const { data: proposal, error: fetchErr } = await supabase
+      .from('proposals')
+      .select('*')
+      .eq('id', id)
+      .single();
+
+    if (fetchErr || !proposal) {
+      return replySafe(ctx, `❌ No se encontró la propuesta #${id}.`);
+    }
+
+    if (proposal.estado !== 'pendiente') {
+      return replySafe(ctx, `ℹ️ La propuesta #${id} ya fue *${proposal.estado}*.`);
+    }
+
+    const approvedBy = ctx.from.username || String(ctx.from.id);
+
+    // 2. Publicar el contenido al knowledge base (tabla compartida con la web)
+    const tag = proposal.tipo.toLowerCase().replace(/\s+/g, '_');
+    const saved = await addKnowledge(proposal.contenido, tag, proposal.nombre);
+
+    // Actualizar modulo en Supabase si está disponible
+    if (saved.id) {
+      await supabase
+        .from('knowledge')
+        .update({ modulo: proposal.modulo })
+        .eq('id', saved.id);
+    }
+
+    // 3. Marcar la propuesta como aprobada
+    await supabase
+      .from('proposals')
+      .update({ estado: 'aprobado', aprobado_by: approvedBy })
+      .eq('id', id);
+
+    replySafe(
+      ctx,
+      `✅ *Propuesta #${id} aprobada y publicada exitosamente.*\n\n` +
+        `📚 *Módulo:* ${proposal.modulo}\n` +
+        `👤 *Autor:* ${proposal.nombre}\n\n` +
+        `El contenido ya está disponible en la web y en el bot.`
+    );
+  } catch (err) {
+    console.error('Error en /aprobar:', err);
+    ctx.reply(`Error al aprobar la propuesta #${id}.`);
+  }
+});
+
+// /rechazar <id> — Rechaza la propuesta sin publicarla
+bot.command('rechazar', async (ctx) => {
+  if (!isAdmin(ctx)) {
+    return replySafe(ctx, '⛔ Este comando está reservado para los administradores del semillero.');
+  }
+
+  if (!supabase) {
+    return replySafe(ctx, '⚠️ Supabase no está configurado en este entorno.');
+  }
+
+  const id = ctx.message.text.replace(/^\/rechazar/, '').trim();
+  if (!id || isNaN(id)) {
+    return replySafe(ctx, '⚠️ *Uso:* `/rechazar <ID>`\n*Ejemplo:* `/rechazar 5`');
+  }
+
+  try {
+    const { error } = await supabase
+      .from('proposals')
+      .update({ estado: 'rechazado' })
+      .eq('id', id)
+      .eq('estado', 'pendiente');
+
+    if (error) throw error;
+
+    replySafe(ctx, `❌ Propuesta *#${id}* rechazada y marcada como no publicable.`);
+  } catch (err) {
+    console.error('Error en /rechazar:', err);
+    ctx.reply(`Error al rechazar la propuesta #${id}.`);
   }
 });
 
