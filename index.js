@@ -76,7 +76,14 @@ bot.start((ctx) => {
     '• `/buscar <término>` — Buscar temas específicos' +
     adminMsg;
 
-  replySafe(ctx, msg);
+  const idInfo = `\n\n🆔 *Tu ID de Telegram:* \`${ctx.from.id}\``;
+
+  replySafe(ctx, msg + idInfo);
+});
+
+// --- /myid ---
+bot.command('myid', (ctx) => {
+  replySafe(ctx, `🆔 Tu ID de Telegram es: \`${ctx.from.id}\``);
 });
 
 // --- /help ---
