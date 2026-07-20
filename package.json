@@ -2,10 +2,10 @@
   "name": "semillero-bot",
   "version": "1.0.0",
   "description": "Bot de Telegram para el semillero Agil Project — responde dudas de programacion y preguntas sobre las clases",
-  "main": "src/index.js",
+  "main": "index.js",
   "type": "module",
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "telegraf": "^4.16.3",
